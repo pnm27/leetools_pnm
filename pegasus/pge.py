@@ -47,7 +47,7 @@ def info():
     print('numpy v%s' % np.__version__)
     print('pandas v%s' % pd.__version__)
 
-def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, protein_coding=False, robust_protein_coding=False):
+def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, robust_protein_coding=False, protein_coding=False, autosome=False):
     
     ### scanpy HVF
     adata=data.to_anndata()
@@ -57,6 +57,12 @@ def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_
         #     del adata.uns
         # adata._inplace_subset_var(adata.var['robust_protein_coding']) # makes a copy, bad for mem
         adata=adata[:,adata.var.robust_protein_coding]
+
+    if protein_coding:
+        adata=adata[:,adata.var.gene_type=='protein_coding']
+
+    if autosome:
+        adata=adata[:,~adata.var.gene_chrom.isin(['MT', 'X', 'Y'])]
 
     # seurat_v3 expects raw counts
     if flavor=='seurat_v3':
@@ -86,7 +92,7 @@ def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_
     # final value counts
     print(data.var.highly_variable_features.value_counts())
 
-def scanpy_hvf_h5ad(h5ad_file, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, protein_coding=False, robust_protein_coding=False):
+def scanpy_hvf_h5ad(h5ad_file, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, robust_protein_coding=False, protein_coding=False, autosome=False):
     
     ### scanpy HVF
     adata=sc.read_h5ad(h5ad_file)
@@ -98,6 +104,12 @@ def scanpy_hvf_h5ad(h5ad_file, flavor='cell_ranger', batch_key=None, min_mean=0.
         #     del adata.uns
         # adata._inplace_subset_var(adata.var['robust_protein_coding']) # makes a copy, bad for mem
         adata=adata[:,adata.var.robust_protein_coding]
+
+    if protein_coding:
+        adata=adata[:,adata.var.gene_type=='protein_coding']
+
+    if autosome:
+        adata=adata[:,~adata.var.gene_chrom.isin(['MT', 'X', 'Y'])]
 
     # seurat_v3 expects raw counts
     if flavor=='seurat_v3':
