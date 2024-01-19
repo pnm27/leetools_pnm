@@ -668,12 +668,14 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
         
         # read annotations only
         adata = read_everything_but_X(orig_h5ad)
-        
-        # subset annotation
+
+        # subset obs
+        if subset_obs is not None:
+            adata._inplace_subset_obs(subset_obs)
+
+        # subset var
         if subset_var is not None:
-            adata = adata[subset_obs,subset_var]
-        else:
-            adata = adata[subset_obs,:]
+            adata._inplace_subset_var(subset_var)
 
         # clean unused cat
         adata = clean_unused_categories(adata)
@@ -728,15 +730,16 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
                 new_data = f['X/data'][tmp_indptr[0]:tmp_indptr[-1]]
                 new_indices = f['X/indices'][tmp_indptr[0]:tmp_indptr[-1]]
                 new_indptr = tmp_indptr - csr_indptr[row_start]
-                new_shape = [tmp_indptr.shape[0]-1, adata.shape[1]]
-                                
-                tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
-
+                
                 if subset_var is not None:
+                    new_shape = [tmp_indptr.shape[0]-1, len(subset_var)]
+                    tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
                     tmp_csr = tmp_csr[subset_obs[row_start:row_end]][:,subset_var]
                 else:
+                    new_shape = [tmp_indptr.shape[0]-1, adata.shape[1]]
+                    tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
                     tmp_csr = tmp_csr[subset_obs[row_start:row_end]]
-
+                    
                 tmp_csr.sort_indices()
 
             # append X
@@ -752,13 +755,14 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
                     new_data = f['raw/X/data'][tmp_indptr[0]:tmp_indptr[-1]]
                     new_indices = f['raw/X/indices'][tmp_indptr[0]:tmp_indptr[-1]]
                     new_indptr = tmp_indptr - csr_indptr[row_start]
-                    new_shape = [tmp_indptr.shape[0]-1, adata.shape[1]]
-                                    
-                    tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
-
+                    
                     if subset_var is not None:
+                        new_shape = [tmp_indptr.shape[0]-1, len(subset_var)]
+                        tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
                         tmp_csr = tmp_csr[subset_obs[row_start:row_end]][:,subset_var]
                     else:
+                        new_shape = [tmp_indptr.shape[0]-1, adata.shape[1]]
+                        tmp_csr = sparse.csr_matrix((new_data, new_indices, new_indptr), shape=new_shape)
                         tmp_csr = tmp_csr[subset_obs[row_start:row_end]]
 
                     tmp_csr.sort_indices()
