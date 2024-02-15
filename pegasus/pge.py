@@ -700,9 +700,13 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
     new_varp=None
     if adata.varp:
         new_varp = adata.varp
+
+    new_layers=None
+    if adata.layers:
+        new_layers = adata.layers
     
     # save obs and var first
-    ad.AnnData(None, obs=adata.obs, var=adata.var, uns=new_uns, obsm=new_obsm, varm=new_varm, obsp=new_obsp, varp=new_varp).write(new_h5ad)
+    ad.AnnData(None, obs=adata.obs, var=adata.var, uns=new_uns, obsm=new_obsm, varm=new_varm, obsp=new_obsp, varp=new_varp, layers=new_layers).write(new_h5ad)
     
     # initialize new_h5ad
     with h5py.File(new_h5ad, "a") as target:
