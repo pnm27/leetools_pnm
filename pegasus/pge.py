@@ -4,6 +4,7 @@
 
 # sc
 import pegasus as pg
+import pegasusio as io
 import scanpy as sc
 import anndata as ad
 from anndata.tests.helpers import assert_equal
@@ -16,16 +17,32 @@ import pandas as pd
 import numpy_groupies as npg # required for pseudoMetaCellByGroup
 from scipy import stats, sparse
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import pairwise_distances
+from sklearn.metrics import pairwise_distances, silhouette_samples, silhouette_score
 from sklearn.cross_decomposition import PLSRegression
 import h5py
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # plot
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import rc_context
+import matplotlib.cm as cm
 import seaborn as sns
 from adjustText import adjust_text
+
+# for Warning
+import warnings
+
+# for typing hints
+# from typing import 
+# from packaging.version import Version # For version comparison
+from typing import TypedDict, Mapping
+import sys
+
+assert sys.version_info > (3,8)
+class GeneInfo(TypedDict):
+    loc: int
+    l_thresh: float
+    n_cells: np.ndarray
 
 sns.set_style("whitegrid", {'axes.grid' : False})
 sc.set_figure_params(scanpy=True, dpi=100, dpi_save=300, fontsize=12, color_map = 'YlOrRd') #'viridis_r'
@@ -47,7 +64,10 @@ def info():
     print('numpy v%s' % np.__version__)
     print('pandas v%s' % pd.__version__)
 
-def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, robust_protein_coding=False, protein_coding=False, autosome=False):
+def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, 
+               max_mean=3.0, min_disp=0.5, n_top_genes=None, 
+               robust_protein_coding=False, protein_coding=False, 
+               autosome=False):
     
     ### scanpy HVF
     adata=data.to_anndata()
@@ -92,7 +112,10 @@ def scanpy_hvf(data, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_
     # final value counts
     print(data.var.highly_variable_features.value_counts())
 
-def scanpy_hvf_h5ad(h5ad_file, flavor='cell_ranger', batch_key=None, min_mean=0.0125, max_mean=3.0, min_disp=0.5, n_top_genes=None, robust_protein_coding=False, protein_coding=False, autosome=False):
+def scanpy_hvf_h5ad(h5ad_file, flavor='cell_ranger', batch_key=None, 
+                    min_mean=0.0125, max_mean=3.0, min_disp=0.5,
+                    n_top_genes=None, robust_protein_coding=False, 
+                    protein_coding=False, autosome=False):
     
     ### scanpy HVF
     adata=sc.read_h5ad(h5ad_file)
@@ -377,8 +400,12 @@ def pearson_corr(mat1, mat2):
 
     for m1 in range(len(mat1.index)):
         for m2 in range(len(mat2.index)):
-            corr[m2,m1] = stats.pearsonr(mat1[common_genes].iloc[m1],
-                                         mat2[common_genes].iloc[m2]).statistic
+            try:
+                corr[m2,m1] = stats.pearsonr(mat1[common_genes].iloc[m1],
+                                            mat2[common_genes].iloc[m2]).statistic
+            except:
+                corr[m2,m1] = stats.pearsonr(mat1[common_genes].iloc[m1],
+                                            mat2[common_genes].iloc[m2])[0]
     df = pd.DataFrame(corr)
     df.columns = mat1.index
     df.index = mat2.index
@@ -551,21 +578,28 @@ def read_everything_but_X(pth) -> ad.AnnData:
     # read all keys but X and raw
     with h5py.File(pth) as f:
         attrs = list(f.keys())
-        attrs.remove('X')
+        if 'X' in attrs:
+            attrs.remove('X')
         if 'raw' in attrs:
             attrs.remove('raw')
+        if 'layers' in attrs:
+            attrs.remove('layers')
         adata = ad.AnnData(**{k: read_elem(f[k]) for k in attrs})
         print(adata.shape)
     return adata
 
 def csc2csr_on_disk(input_pth, output_pth):
     """
-    Params
-    ------
+    Parameters
+    ----------
     input_pth
         h5ad file in csc format
     output_pth
         h5ad file to write in csr format
+    
+    Returns
+    -------
+    ``None``
     """
     annotations = read_everything_but_X(input_pth)
     annotations.write_h5ad(output_pth)
@@ -581,12 +615,16 @@ def csc2csr_on_disk(input_pth, output_pth):
 
 def concat_on_disk(input_pths, output_pth, temp_pth='temp.h5ad'):
     """
-    Params
-    ------
+    Parameters
+    ----------
     input_pths
         Paths to h5ad files which will be concatenated
     output_pth
         File to write as a result
+
+    Returns
+    -------
+    ``None``
     """
     annotations = ad.concat([read_everything_but_X(pth) for pth in input_pths])
     annotations.write_h5ad(output_pth)
@@ -662,7 +700,9 @@ def write_h5ad_with_new_annotation(original_h5ad, adata, new_h5ad, raw = False):
                 write_elem(target, "raw/X", dummy_X)
                 SparseDataset(target["raw/X"]).append(SparseDataset(src["raw/X"]))
 
-def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size = 500000, raw = False, adata = None):
+def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, 
+        chunk_size = 500000, raw = False, adata = None, 
+        other_layer_asX=None,):
 
     if adata is None:
         
@@ -719,9 +759,15 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
         
     # get indptr first
     with h5py.File(orig_h5ad, 'r') as f:
-        csr_indptr = f['X/indptr'][:]
+        if 'X' in f.keys() and other_layer_asX is None:
+            csr_indptr = f['X/indptr'][:]
+        elif other_layer_asX in f['layers'].keys():
+            csr_indptr = f[f"layers/{other_layer_asX}/indptr"][:]
+        else:
+            raise ValueError("Matrices not found in h5ad file")
 
     # append subset of X
+    # SUBSET VARM AND VARP TOO
     for idx in [i for i in range(0, csr_indptr.shape[0]-1, chunk_size)]:
         print('Processing', idx, 'to', idx+chunk_size)
         row_start, row_end = idx, idx+chunk_size
@@ -731,8 +777,13 @@ def ondisk_subset(orig_h5ad, new_h5ad, subset_obs, subset_var = None, chunk_size
             with h5py.File(orig_h5ad, 'r') as f:
                 tmp_indptr = csr_indptr[row_start:row_end+1]
                 
-                new_data = f['X/data'][tmp_indptr[0]:tmp_indptr[-1]]
-                new_indices = f['X/indices'][tmp_indptr[0]:tmp_indptr[-1]]
+                if 'X' in f.keys() and other_layer_asX is None:
+                    new_data = f['X/data'][tmp_indptr[0]:tmp_indptr[-1]]
+                    new_indices = f['X/indices'][tmp_indptr[0]:tmp_indptr[-1]]
+                else:
+                    new_data = f[f"layers/{other_layer_asX}/data"][tmp_indptr[0]:tmp_indptr[-1]]
+                    new_indices = f[f"layers/{other_layer_asX}/indices"][tmp_indptr[0]:tmp_indptr[-1]]
+
                 new_indptr = tmp_indptr - csr_indptr[row_start]
                 
                 if subset_var is not None:
@@ -812,24 +863,36 @@ def sankey(left, right, leftWeight=None, rightWeight=None, colorDict=None,
            fontsize=10, figureName=None, closePlot=False, size_x=6, size_y=12):
     '''
     Make Sankey Diagram showing flow from left-->right
-    Inputs:
-        left = NumPy array of object labels on the left of the diagram
-        right = NumPy array of corresponding labels on the right of the diagram
+    Parameters
+    ----------
+        left
+            NumPy array of object labels on the left of the diagram
+        right
+            NumPy array of corresponding labels on the right of the diagram
             len(right) == len(left)
-        leftWeight = NumPy array of weights for each strip starting from the
+        leftWeight
+            NumPy array of weights for each strip starting from the
             left of the diagram, if not specified 1 is assigned
-        rightWeight = NumPy array of weights for each strip starting from the
+        rightWeight
+            NumPy array of weights for each strip starting from the
             right of the diagram, if not specified the corresponding leftWeight
             is assigned
-        colorDict = Dictionary of colors to use for each label
+        colorDict
+            Dictionary of colors to use for each label
             {'label':'color'}
-        leftLabels = order of the left labels in the diagram
-        rightLabels = order of the right labels in the diagram
-        aspect = vertical extent of the diagram in units of horizontal extent
-        rightColor = If true, each strip in the diagram will be be colored
-                    according to its left label
-    Ouput:
-        None
+        leftLabels
+            order of the left labels in the diagram
+        rightLabels
+            order of the right labels in the diagram
+        aspect
+            vertical extent of the diagram in units of horizontal extent
+        rightColor
+            If true, each strip in the diagram will be be colored
+            according to its left label
+    
+    Returns
+    -------
+        ``None``
     '''
     if leftWeight is None:
         leftWeight = []
@@ -1133,3 +1196,364 @@ def calc_zscore_per_cluster(adata, cluster_labels='subclass', variable='n_genes'
     for s in sorted(adata.obs[cluster_labels].cat.categories):
         print(s)
         adata.obs.loc[adata.obs[cluster_labels]==s, zscore_name] = stats.zscore(np.array(adata[(adata.obs[cluster_labels]==s)].obs[variable]))
+
+def get_better_cmaps(labels):
+    n_cols = len(labels)
+    col_maps = {}
+    return
+
+def calc_silhouette_vals(adata, cluster_labels, mat='X', mapping='umap'):
+    
+    if isinstance(cluster_labels, str):
+        if cluster_labels not in adata.obs.keys():
+            raise ValueError('Given cluster_labels not present in the obs column!')
+        range_n_clusters = adata.obs[cluster_labels].unique()
+        cluster_labels = adata.obs[cluster_labels]
+    else:
+        raise ValueError("Expected cluster_labels as string. Provided type", type(cluster_labels))
+
+    if isinstance(adata, ad.AnnData) and mat != 'X':
+        # The silhouette_score gives the average value for all the samples.
+        # This gives a perspective into the density and separation of the formed
+        # clusters
+        exp_mat = adata.layers[mat]
+        silhouette_avg = silhouette_score(exp_mat, cluster_labels)
+        print(
+            "For n_clusters =",
+            len(range_n_clusters),
+            "The average silhouette_score is :",
+            silhouette_avg,
+        )
+        # Compute the silhouette scores for each sample
+        sample_silhouette_values = silhouette_samples(exp_mat, cluster_labels)
+    elif isinstance(adata, ad.AnnData) and mat == 'X':
+        # The silhouette_score gives the average value for all the samples.
+        # This gives a perspective into the density and separation of the formed
+        # clusters
+        exp_mat = adata.X
+        silhouette_avg = silhouette_score(exp_mat, cluster_labels)
+        print(
+            "For n_clusters =",
+            len(range_n_clusters),
+            "The average silhouette_score is :",
+            silhouette_avg,
+        )
+        # Compute the silhouette scores for each sample
+        sample_silhouette_values = silhouette_samples(exp_mat, cluster_labels)
+    elif isinstance(adata, io.MultimodalData):
+        adata.select_matrix(mat)
+        # The silhouette_score gives the average value for all the samples.
+        # This gives a perspective into the density and separation of the formed
+        # clusters
+        exp_mat = adata.X
+        silhouette_avg = silhouette_score(exp_mat, cluster_labels)
+        print(
+            "For n_clusters =",
+            len(range_n_clusters),
+            "The average silhouette_score is :",
+            silhouette_avg,
+        )
+        # Compute the silhouette scores for each sample
+        sample_silhouette_values = silhouette_samples(exp_mat, cluster_labels)
+
+    # Create a subplot with 1 row and 2 columns
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+    fig.set_size_inches(18, 7)
+
+    # The 1st subplot is the silhouette plot
+    # The silhouette coefficient can range from -1, 1 but in this example all
+    # lie within [-0.1, 1]
+    ax1.set_xlim([-1, 1])
+    # The (n_clusters+1)*10 is for inserting blank space between silhouette
+    # plots of individual clusters, to demarcate them clearly.
+    ax1.set_ylim([0, (len(range_n_clusters) + 2) * 10])
+
+    y_lower = 10
+    for i in range(len(range_n_clusters)):
+        # Aggregate the silhouette scores for samples belonging to
+        # cluster i, and sort them
+        ith_cluster_silhouette_values = sample_silhouette_values[cluster_labels == i]
+
+        ith_cluster_silhouette_values.sort()
+
+        size_cluster_i = ith_cluster_silhouette_values.shape[0]
+        y_upper = y_lower + size_cluster_i
+
+        # color = cm.nipy_spectral(float(i) / len(range_n_clusters))
+        color = cm.get_cmap()
+        ax1.fill_betweenx(
+            np.arange(y_lower, y_upper),
+            0,
+            ith_cluster_silhouette_values,
+            facecolor=color,
+            edgecolor=color,
+            alpha=0.7,
+        )
+
+        # Label the silhouette plots with their cluster numbers at the middle
+        ax1.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
+
+        # Compute the new y_lower for next plot
+        y_lower = y_upper + 10  # 10 for the 0 samples
+
+    ax1.set_title("The silhouette plot for the various clusters.")
+    ax1.set_xlabel("The silhouette coefficient values")
+    ax1.set_ylabel("Cluster label")
+
+    # The vertical line for average silhouette score of all the values
+    ax1.axvline(x=silhouette_avg, color="red", linestyle="--")
+
+    ax1.set_yticks([])  # Clear the yaxis labels / ticks
+    ax1.set_xticks([-0.1, 0, 0.2, 0.4, 0.6, 0.8, 1])
+
+    # 2nd Plot showing the actual clusters formed
+    colors = cm.nipy_spectral(cluster_labels.astype(float) / n_clusters)
+    ax2
+    if isinstance(adata, io.MultimodalData):
+        sc.pl.umap(adata.to_anndata(), color=[], legend_loc='on data', 
+                frameon=False, legend_fontsize=5, 
+            legend_fontoutline=1, title=['leiden_labels_10PCs_3_5kHVF_01Res'], 
+            size=5, wspace=0, ncols=1, save='161Pools_DL-3_5kHVF_10PCs_01Res.png')
+    else:
+        sc.pl.umap(adata, color=['leiden_labels'], legend_loc='on data', 
+                frameon=False, legend_fontsize=5, 
+            legend_fontoutline=1, title=['leiden_labels_10PCs_3_5kHVF_01Res'], 
+            size=5, wspace=0, ncols=1, save='161Pools_DL-3_5kHVF_10PCs_01Res.png')
+
+
+    plt.suptitle(
+        "Silhouette analysis for KMeans clustering on sample data with n_clusters = %d"
+        % n_clusters,
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    plt.show()
+    fig.tight_layout()
+    plt.savefig()
+    plt.close()
+
+def cells_exp_genes(
+    data: ad.AnnData | io.MultimodalData, 
+    gene: dict[str, float], 
+    var: str | None=None,
+    mat: str ='X',
+    ) -> Mapping[str, GeneInfo]:
+    """Helper function to mark cells expressing genes above given threshold.
+
+    This function is a helper function to mark cells expressing a set of 
+    genes above a given threshold (can be unique for each gene). This looks 
+    at only ``X`` matrix by default.
+
+    Parameters
+    ----------
+    data: ``io.MultimodalData``
+        Annotated data matrix with rows for cells and columns for genes.
+    gene: ``dict``
+        A dict with gene names as keys and expression value (threshold) as values.
+    var: ``str``, optional, default=None
+        A key in ``data.var`` that contains gene names as opposed to being in ``data.var_names``.
+    mat: ``str``, optional, default='X'
+        If any ``layer`` of ad.Anndata or ``matrix`` of io.Mul
+
+    Returns
+    -------
+    dict
+        Contains n_cells and threshold for each gene.
+
+    See Also
+    --------
+    mark_cells: Function that marks cells
+    """
+    
+    if not isinstance(data, ad.AnnData):
+        cur_matkey = data.current_matrix()
+
+    if mat is not None and isinstance(data, io.MultimodalData):
+        data.select_matrix(mat)
+
+    # ret_d = dict.fromkeys(gene.keys(), {})  # This creates dict of genes, where the dict is a copy
+    ret_d = {k: {} for k in gene.keys()}
+    # gene_info_d = dict.fromkeys(['loc', 'l_thresh', 'cells'])
+    # if isinstance(gene, str):
+    #     gene = [gene]
+    
+    if var is not None and var not in data.var.columns:
+        raise ValueError(f"Given var name {var} doesn't exist in the provided file")
+    
+    print_val = 'var_names' if var is None else var
+    for g, t in gene.items():
+        if g in data.var_names and var is None:
+            ret_d[g]['loc'] = np.where(data.var_names == g)[0][0]
+            ret_d[g]['l_thresh'] = t
+            if (isinstance(data, io.MultimodalData)
+                or (isinstance(data, ad.AnnData) and mat == 'X')):
+                ret_d[g]['cells'] = ((data.X[:, ret_d[g]['loc']]>t).A).flatten()
+            elif isinstance(data, ad.AnnData) and mat != 'X':
+                ret_d[g]['cells'] = ((data.layers[mat][:, ret_d[g]['loc']]>t).A).flatten()
+        elif var is not None and g in data.var[var]:
+            ret_d[g]['loc'] = np.where(data.var[var] == g)[0][0]
+            ret_d[g]['l_thresh'] = t
+            if (isinstance(data, io.MultimodalData)
+                or (isinstance(data, ad.AnnData) and mat == 'X')):
+                ret_d[g]['cells'] = ((data.X[:, ret_d[g]['loc']]>t).A).flatten()
+            elif isinstance(data, ad.AnnData) and mat != 'X':
+                ret_d[g]['cells'] = ((data.layers[mat][:, ret_d[g]['loc']]>t).A).flatten()
+        else:
+            print(f"Gene {gene} not found in {print_val}!, skipping it!")
+
+    # Reset current matrix if needed.
+    if not isinstance(data, ad.AnnData):
+        if cur_matkey != data.current_matrix():
+            data.select_matrix(cur_matkey)
+
+    return ret_d
+
+def mark_cells(gene_dict, subset_genes=None):
+    if not gene_dict:
+        raise ValueError("Input is empty!")
+    
+    for k,v in gene_dict.items():
+        if 'cells' not in v.keys():
+            raise ValueError(f"For the gene {k} there is no key called 'cells'!")
+        n_cells = len(v['cells'])
+        
+    
+    temp_arr = np.ones(n_cells).astype(bool)
+    if subset_genes is None:
+        for k,v in gene_dict.items():
+            print(k, Counter(gene_dict[k]['cells']))
+            temp_arr = temp_arr & gene_dict[k]['cells']
+    else:
+        for k,v in gene_dict.items():
+            if k in subset_genes:
+                print(k, Counter(gene_dict[k]['cells']))
+                temp_arr = temp_arr & gene_dict[k]['cells']
+
+    print()
+    print(Counter(temp_arr))
+    return temp_arr
+
+def filter_pegasus_hvf(
+    data: io.MultimodalData, 
+    batch: str = None, 
+    n_genes: int = 2000, 
+    gene_id_col: str = None, 
+    robust_protein_coding: bool = True, 
+    chr_col: str ='chr', 
+    autosome_only: bool = False,
+    mito_pref: str = 'MT-', 
+    species: str = 'human') -> None:
+    """Filter chr-specific HVF, pegasus-style.
+    
+    Parameters
+    ----------
+    data: ``pegasusio.MultimodalData``
+        Annotated data matrix with rows for cells and columns for genes.
+    
+    batch: ``str``, optional, default: ``None``
+        A key in ``data.obs`` specifying batch information. 
+        If `batch` is not set, do not consider batch effects in selecting highly variable features. 
+        
+    n_genes: ``int``, optional, default: ``2000``.
+        Number of Highly variable features to select after filtering.
+
+    gene_id_col: ``str``, optional, default: ``None``.
+        A key in ``data.var`` containing gene IDs. 
+        Needed if ``data.var_names`` contains duplicated gene names as gene IDs will be unique.
+
+    robust_protein_coding: ``bool``, optional, default: ``True``.
+        Whether to subset for robust protein coding genes.
+
+    chr_col: ``str``, optional, default: ``chr``.
+        A key in ``data.var`` that contains chromosome.
+
+    autosome_only: ``bool``, optional, default: ``False``.
+        Whether to remove only sex-specific genes or sex-specific and mito genes.
+
+    mito_pref: ``str``, optional, default: ``MT-``
+        Prefix for mitochondrial genes.
+
+    species: ``str``, optional, {``human``, }
+        Species can be one of Human, Mouse or Rat. This is used to identify gene IDs, if they are present as the index of ``data``.
+
+
+    Returns
+    -------
+    ``None``.
+
+    Update ``data.var``:
+        * ``highly_variable_features``: replace with Boolean type array indicating the selected highly variable features.
+
+
+    Examples
+    --------
+    >>> pge.filter_pegasus_hvf(adata, batch='Brain_bank', n_genes=6000, gene_id_col='gene_id')
+    >>> pge.filter_pegasus_hvf(adata)
+    """
+    gene_id_prefixes = {
+        'human': 'ENSG',
+        'mouse': 'ENSMUSG',
+        'rat': 'ENSRNO',
+    }
+    subset_cols = ['hvf_rank', chr_col, 'highly_variable_features']
+    subset_chr = ['X', 'Y',] if autosome_only else ['X', 'Y', 'MT']
+    
+    # If chr column is not categorical
+    if data.var[chr_col].dtype.name != 'category':
+        data.var[chr_col] = data.var[chr_col].astype('category')
+    
+    subset_chr = [ v for v in subset_chr if v in data.var[chr_col].cat.categories] 
+
+    if species.lower() not in gene_id_prefixes.keys():
+        raise ValueError("Unexpected Species Name provided!")
+    
+    if gene_id_col is not None and data.var[gene_id_col].duplicated().any():
+        raise ValueError("Given gene_id_col has duplicates!")
+
+    pref = gene_id_prefixes[species.lower()]
+    #  Select more than 2k HVG genes
+    pg.highly_variable_features(data, batch=batch, n_top=n_genes+1000)
+
+    # Index with gene_IDS, if gene_names are used for indexing
+    temp_cols = data.var_names
+    check_vals = (temp_cols.to_series()
+        .apply(lambda x: not (x.startswith(pref) or x.startswith(mito_pref + pref)))
+        )
+    gene_name_index = check_vals.all() # If gene names are as index then this would be True
+    reassign = False
+    if len(temp_cols) != len(set(temp_cols)) and gene_id_col is None:
+        raise ValueError("gene_id_col is None while indices aren't unique")
+    elif len(temp_cols) == len(set(temp_cols)) and gene_id_col is None:
+        print("Index is unique. No changes needed for the index!")
+    elif len(temp_cols) != len(set(temp_cols)) and gene_id_col in data.var:
+        print("Duplicated indices detected in the index. gene_id_col will be used ")
+        if gene_name_index:
+            data.var_names = data.var[gene_id_col]
+            reassign = True
+        else:
+            print("This shouldn't print!")  
+    else:
+        warnings.warn("Index is unique, gene_id_col need not be used")
+
+    if robust_protein_coding:
+        df = data.var.loc[data.var['robust_protein_coding'], subset_cols].copy()
+    else:
+        df = data.var.loc[:, subset_cols].copy()
+
+    df2 = df.sort_values(by='hvf_rank', ascending=True)
+    df['new_hvf'] = False
+
+    df2 = df2.loc[df2[gene_id_col].isin(subset_chr), ]
+
+    #  Select top 2000 HVG now
+    df.loc[df2.index[:n_genes], 'new_hvf'] = True
+
+    # Assign 2000 HVG
+    data.var['highly_variable_features'] = df['new_hvf']
+    data.var['highly_variable_features'] = data.var['highly_variable_features'].fillna(False)
+
+    # Replace old index
+    if reassign:
+        data.var_names = temp_cols
+    
